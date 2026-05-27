@@ -464,7 +464,12 @@ export default {
 						if (订阅类型 === 'mixed' && (!ua.includes('mozilla') || url.searchParams.has('b64') || url.searchParams.has('base64'))) 订阅内容 = btoa(订阅内容);
 
 						if (订阅类型 === 'singbox') {
-							订阅内容 = await Singbox订阅配置文件热补丁(订阅内容, config_JSON);
+							// 方案C：?sblegacy / ?legacy 查询参数或 SINGBOX_LEGACY 环境变量可强制输出旧版(1.11)配置格式
+							const 强制旧版SingBox = url.searchParams.has('sblegacy') || url.searchParams.has('legacy') || ['1', 'true'].includes(String(env.SINGBOX_LEGACY ?? env.SBLEGACY ?? '').trim().toLowerCase());
+							// 方案B：根据客户端 UA 中的 sing-box 版本决定是否迁移到新版 DNS 格式（仅 1.12.0+ 支持 dns.servers[].type）
+							const SingBox客户端版本 = 解析SingBox版本(UA);
+							const 执行SingBox新版迁移 = 强制旧版SingBox ? false : (SingBox客户端版本 ? (SingBox客户端版本.major > 1 || (SingBox客户端版本.major === 1 && SingBox客户端版本.minor >= 12)) : true);
+							订阅内容 = await Singbox订阅配置文件热补丁(订阅内容, config_JSON, 执行SingBox新版迁移);
 							responseHeaders["content-type"] = 'application/json; charset=utf-8';
 						} else if (订阅类型 === 'clash') {
 							订阅内容 = Clash订阅配置文件热补丁(订阅内容, config_JSON);
@@ -4320,7 +4325,15 @@ function Clash订阅配置文件热补丁(Clash_原始订阅内容, config_JSON 
 	return processedLines.join('\n');
 }
 
-async function Singbox订阅配置文件热补丁(SingBox_原始订阅内容, config_JSON = {}) {
+// 从客户端 UA 中解析 sing-box 内核版本，用于判断是否支持新版(1.12.0+) DNS 配置格式
+function 解析SingBox版本(ua) {
+	if (!ua || typeof ua !== 'string') return null;
+	const 匹配 = ua.match(/sing-?box[\/\s]?v?(\d+)\.(\d+)(?:\.(\d+))?/i) || ua.match(/\bSF[IAMT]\/v?(\d+)\.(\d+)(?:\.(\d+))?/i);
+	if (!匹配) return null;
+	return { major: Number(匹配[1]), minor: Number(匹配[2]), patch: Number(匹配[3] || 0) };
+}
+
+async function Singbox订阅配置文件热补丁(SingBox_原始订阅内容, config_JSON = {}, 执行新版迁移 = true) {
 	const uuid = config_JSON?.UUID || null;
 	const fingerprint = config_JSON?.Fingerprint || "chrome";
 	const ECH启用 = Boolean(config_JSON?.ECH);
@@ -4386,6 +4399,7 @@ async function Singbox订阅配置文件热补丁(SingBox_原始订阅内容, co
 			return rule;
 		};
 
+		if (执行新版迁移) { // 仅当客户端为 sing-box 1.12.0+ 时才迁移到新版配置格式，否则保持后端输出的旧版(1.11)格式以兼容低版本客户端
 		if (Array.isArray(config.inbounds)) {
 			for (const inbound of config.inbounds) {
 				if (!inbound || typeof inbound !== 'object' || inbound.type !== 'tun') continue;
@@ -4561,6 +4575,7 @@ async function Singbox订阅配置文件热补丁(SingBox_原始订阅内容, co
 			const outboundTags = new Set(config.outbounds.map(outbound => outbound?.tag).filter(Boolean));
 			const 引用REJECT = value => value === 'REJECT' || (value && typeof value === 'object' && (Array.isArray(value) ? value.some(引用REJECT) : Object.values(value).some(引用REJECT)));
 			if (!outboundTags.has('REJECT') && 引用REJECT({ outbounds: config.outbounds, route: config.route })) config.outbounds.push({ type: 'block', tag: 'REJECT' });
+		}
 		}
 
 		// --- UUID 匹配节点的 TLS 热补丁 (utls & ech) ---
